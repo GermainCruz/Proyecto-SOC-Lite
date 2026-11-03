@@ -1,0 +1,137 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: soclite-postgres
+    environment:
+      POSTGRES_DB: soclite
+      POSTGRES_USER: soc_admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-soc_admin_dev}
+      TZ: America/Lima
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/00_init.sql:/docker-entrypoint-initdb.d/00_init.sql:ro
+      - ./db/01_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./db/02_seed.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U soc_admin -d soclite"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [socnet]
+
+  backend:
+    build:
+      context: ./backend
+    container_name: soclite-backend
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-dev}
+      DATABASE_URL: postgresql+asyncpg://soc_app:soc_app@postgres:5432/soclite
+      JWT_SECRET: ${JWT_SECRET:-cambie-este-secreto-de-al-menos-32-caracteres}
+      AI_SERVICE_URL: http://ai-service:8000
+      AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:-dev-token-soclite}
+      REPORTS_DIR: /var/soclite/reports
+      CORS_ORIGINS: http://localhost:5173,http://localhost:8080
+      TZ: America/Lima
+    volumes:
+      - reports:/var/soclite/reports
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks: [socnet]
+
+  ai-service:
+    build:
+      context: ./ai-service
+    container_name: soclite-ai
+    environment:
+      SERVICE_TOKEN: ${AI_SERVICE_TOKEN:-dev-token-soclite}
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b-instruct-q4_K_M}
+      VIRUSTOTAL_API_KEY: ${VIRUSTOTAL_API_KEY:-}
+      ABUSEIPDB_API_KEY: ${ABUSEIPDB_API_KEY:-}
+    ports:
+      - "8081:8000"
+    depends_on:
+      ollama:
+        condition: service_started
+    networks: [socnet]
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: /api/v1
+    container_name: soclite-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    networks: [socnet]
+
+  n8n:
+    image: n8nio/n8n:1.72.1
+    container_name: soclite-n8n
+    environment:
+      N8N_HOST: n8n.local
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      GENERIC_TIMEZONE: America/Lima
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-clave-de-cifrado-n8n}
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: soc_admin
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:-soc_admin_dev}
+      N8N_RUNNERS_ENABLED: "true"
+      NODE_FUNCTION_ALLOW_BUILTIN: "*"
+      NODE_FUNCTION_ALLOW_EXTERNAL: "*"
+    volumes:
+      - n8ndata:/home/node/.n8n
+      - ./workflows:/workflows:ro
+    ports:
+      - "5678:5678"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [socnet]
+
+  ollama:
+    image: ollama/ollama:0.5.4
+    container_name: soclite-ollama
+    volumes:
+      - ollamadata:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks: [socnet]
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: soclite-redis
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redisdata:/data
+    ports:
+      - "6379:6379"
+    networks: [socnet]
+
+volumes:
+  pgdata:
+  reports:
+  n8ndata:
+  ollamadata:
+  redisdata:
+
+networks:
+  socnet:
+    driver: bridge
+

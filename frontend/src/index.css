@@ -1,0 +1,34 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  @apply bg-[#F5F7FA] text-[#343C6A] antialiased;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+::selection {
+  @apply bg-[#EDF2FF] text-[#2D60FF];
+}
+
+.table-sticky thead th {
+  @apply sticky top-0 z-10 bg-[#F5F7FA] text-[#718EBF];
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  height: 6px;
+  width: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  @apply rounded-full bg-[#DFEAF2] hover:bg-[#718EBF];
+}

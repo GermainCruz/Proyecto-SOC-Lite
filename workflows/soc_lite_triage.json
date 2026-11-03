@@ -1,0 +1,711 @@
+{
+  "name": "SOC-Lite · Triaje automático de alertas",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "soc-lite/wazuh",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": false
+        }
+      },
+      "id": "b1a10001-0000-4000-8000-000000000001",
+      "name": "Webhook Wazuh",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-880, 300],
+      "webhookId": "c0f3e1a2-8b4d-4c1e-9a77-1f2d3e4b5c60",
+      "notes": "Recibe la alerta cruda desde la integración de Wazuh (o desde OPNsense/Suricata mediante el mismo contrato). Autenticación por header X-SOC-Token."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normaliza el payload de Wazuh y calcula la huella de deduplicación.\n// Función SHA-256 pura en JavaScript sin dependencias de módulos externos (sandbox n8n).\nfunction sha256(ascii) {\n  function r(v, a) { return (v >>> a) | (v << (32 - a)); }\n  const m = Math.pow, mw = m(2, 32);\n  let i, j, res = '', w = [], abl = ascii.length * 8, h = [], k = [], pc = 0, ic = {};\n  for (let c = 2; pc < 64; c++) {\n    if (!ic[c]) {\n      for (i = c * 2; i < 313; i += c) ic[i] = true;\n      if (pc < 8) h[pc] = (m(c, 0.5) * mw) | 0;\n      k[pc++] = (m(c, 1 / 3) * mw) | 0;\n    }\n  }\n  ascii += '\\x80';\n  while ((ascii.length % 64) - 56) ascii += '\\x00';\n  for (i = 0; i < ascii.length; i++) {\n    j = ascii.charCodeAt(i);\n    w[i >> 2] |= j << (((3 - i) % 4) * 8);\n  }\n  w[w.length] = (abl / mw) | 0;\n  w[w.length] = abl;\n  for (j = 0; j < w.length;) {\n    const W = w.slice(j, j += 16), oh = h;\n    h = h.slice(0, 8);\n    for (i = 0; i < 64; i++) {\n      const w15 = W[i - 15], w2 = W[i - 2];\n      const s0 = r(w15, 7) ^ r(w15, 18) ^ (w15 >>> 3);\n      const s1 = r(w2, 17) ^ r(w2, 19) ^ (w2 >>> 10);\n      const ch = (h[4] & h[5]) ^ (~h[4] & h[6]);\n      const maj = (h[0] & h[1]) ^ (h[0] & h[2]) ^ (h[1] & h[2]);\n      const t1 = h[7] + (r(h[4], 6) ^ r(h[4], 11) ^ r(h[4], 25)) + ch + k[i] + (W[i] = (i < 16) ? W[i] : (W[i - 16] + s0 + W[i - 7] + s1) | 0);\n      const t2 = (r(h[0], 2) ^ r(h[0], 13) ^ r(h[0], 22)) + maj;\n      h = [(t1 + t2) | 0].concat(h);\n      h[4] = (h[4] + t1) | 0;\n    }\n    for (i = 0; i < 8; i++) h[i] = (h[i] + oh[i]) | 0;\n  }\n  for (i = 0; i < 8; i++) {\n    for (j = 3; j >= 0; j--) {\n      const b = (h[i] >> (j * 8)) & 255;\n      res += (b < 16 ? '0' : '') + b.toString(16);\n    }\n  }\n  return res;\n}\n\nreturn $input.all().map((item) => {\n  const body = item.json.body ?? item.json;\n  const alert = body.alert ?? body;\n  const rule = alert.rule ?? {};\n  const data = alert.data ?? {};\n  const agent = alert.agent ?? {};\n\n  const level = Number(rule.level ?? body.rule_level ?? 0);\n  const severity = level >= 12 ? 'critical'\n    : level >= 10 ? 'high'\n    : level >= 7  ? 'medium'\n    : level >= 4  ? 'low'\n    : 'info';\n\n  const source = (body.source ?? 'wazuh').toLowerCase();\n  const title = String(rule.description ?? body.title ?? 'Alerta sin descripción').slice(0, 240);\n  const srcIp = data.srcip ?? body.src_ip ?? null;\n  const dstIp = data.dstip ?? body.dst_ip ?? null;\n  const fpData = [source, rule.id ?? '', srcIp ?? '', dstIp ?? '', title.slice(0, 120)].join('|');\n  const fingerprint = sha256(fpData);\n\n  return {\n    json: {\n      external_id: String(alert.id ?? body.id ?? fingerprint.slice(0, 16)),\n      source,\n      rule_id: String(rule.id ?? body.rule_id ?? 'N/D'),\n      rule_level: level,\n      severity,\n      title,\n      description: alert.full_log ?? rule.description ?? body.description ?? '',\n      src_ip: srcIp,\n      dst_ip: dstIp,\n      src_port: data.srcport ? Number(data.srcport) : null,\n      dst_port: data.dstport ? Number(data.dstport) : null,\n      protocol: data.protocol ?? null,\n      username: data.dstuser ?? data.srcuser ?? null,\n      agent_name: agent.name ?? body.agent_name ?? null,\n      mitre_tactic: (rule.mitre?.tactic ?? []).join(', ') || null,\n      mitre_technique: (rule.mitre?.id ?? []).join(', ') || null,\n      fingerprint,\n      detected_at: alert.timestamp ?? new Date().toISOString(),\n      raw_payload: body\n    }\n  };\n});"
+      },
+      "id": "b1a10002-0000-4000-8000-000000000002",
+      "name": "Normalizar alerta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-660, 300],
+      "notes": "Transforma el JSON de Wazuh al contrato interno y calcula la huella SHA-256 usada por el UPSERT."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-level",
+              "leftValue": "={{ $json.rule_level }}",
+              "rightValue": 4,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b1a10003-0000-4000-8000-000000000003",
+      "name": "IF Filtro severidad",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [-440, 300],
+      "notes": "Descarta eventos informativos (nivel < 4) que no aportan valor operativo."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH p AS (\n  SELECT $1::text AS external_id, $2::text AS source, $3::text AS rule_id,\n         $4::int AS rule_level, $5::text AS severity, $6::text AS title,\n         $7::text AS description, $8::text AS src_ip, $9::text AS dst_ip,\n         $10::int AS src_port, $11::int AS dst_port, $12::text AS protocol,\n         $13::text AS username, $14::text AS agent_name, $15::jsonb AS raw_payload,\n         $16::text AS fingerprint, $17::text AS mitre_tactic, $18::text AS mitre_technique\n)\nINSERT INTO soc.alerts (\n    external_id, source_id, rule_id, rule_level, severity, title, description,\n    src_ip, dst_ip, src_port, dst_port, protocol, username, agent_name,\n    raw_payload, mitre_tactic, mitre_technique, first_seen_at, last_seen_at)\nSELECT p.external_id,\n       (SELECT id FROM soc.alert_sources WHERE code = p.source),\n       p.rule_id, p.rule_level, p.severity::soc.severity_level, p.title, p.description,\n       p.src_ip::inet, p.dst_ip::inet, p.src_port, p.dst_port, p.protocol, p.username,\n       p.agent_name, p.raw_payload, p.mitre_tactic, p.mitre_technique, now(), now()\n  FROM p\n WHERE p.title IS NOT NULL\nON CONFLICT (source_id, fingerprint) DO UPDATE\n   SET dedup_count = soc.alerts.dedup_count + 1,\n       last_seen_at = now(),\n       raw_payload  = EXCLUDED.raw_payload\nRETURNING id, dedup_count, fingerprint, (xmax = 0) AS inserted;",
+        "options": {
+          "queryReplacement": "={{ [\n  $json.external_id, $json.source, $json.rule_id, $json.rule_level, $json.severity,\n  $json.title, $json.description, $json.src_ip, $json.dst_ip, $json.src_port,\n  $json.dst_port, $json.protocol, $json.username, $json.agent_name,\n  JSON.stringify($json.raw_payload), $json.fingerprint, $json.mitre_tactic,\n  $json.mitre_technique\n] }}"
+        }
+      },
+      "id": "b1a10004-0000-4000-8000-000000000004",
+      "name": "Postgres Upsert alerta",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [-220, 300],
+      "credentials": {
+        "postgres": {
+          "id": "soclite-pg",
+          "name": "SOC-Lite PostgreSQL"
+        }
+      },
+      "notes": "UPSERT idempotente por (source_id, fingerprint). xmax = 0 indica inserción nueva; si es 0 se incrementa dedup_count."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-new",
+              "leftValue": "={{ $json.inserted }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "cond-dup",
+              "leftValue": "={{ $json.dedup_count }}",
+              "rightValue": 5,
+              "operator": {
+                "type": "number",
+                "operation": "lte"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "b1a10005-0000-4000-8000-000000000005",
+      "name": "IF Ruido repetitivo",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [0, 300],
+      "notes": "Solo se triajea la primera ocurrencia y las reincidencias significativas (≤ 5). El resto se agrupa para no gastar tokens ni fatigar al analista."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://ai-service:8000/api/v1/triage",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Request-Source",
+              "value": "n8n"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  alert_id: $('Postgres Upsert alerta').item.json.id,\n  alert: $('Normalizar alerta').item.json,\n  context: {\n    source: $('Normalizar alerta').item.json.source,\n    asset_criticality: 'high',\n    historical_false_positive_rate: 0.18\n  }\n}) }}",
+        "options": {
+          "timeout": 90000,
+          "response": {
+            "response": {
+              "neverError": false,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "b1a10006-0000-4000-8000-000000000006",
+      "name": "HTTP Triaje IA",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "soclite-ai-token",
+          "name": "SOC-Lite AI Service Token"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput",
+      "notes": "Invoca el microservicio LangChain/FastAPI. Reintentos exponenciales y salida de error para no perder la alerta si el LLM no responde."
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "sw-critical",
+                    "leftValue": "={{ $json.suggested_severity }}",
+                    "rightValue": "critical",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "crítica"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "sw-high",
+                    "leftValue": "={{ $json.suggested_severity }}",
+                    "rightValue": "high",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "alta"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "media/baja"
+        }
+      },
+      "id": "b1a10007-0000-4000-8000-000000000007",
+      "name": "Switch Severidad",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [440, 300],
+      "notes": "Enruta el resultado del triaje: crítica/alta disparan notificación y ticket; media/baja solo registro."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO soc.triage_results (\n    alert_id, engine, model, prompt_version, suggested_severity, verdict, confidence,\n    summary, recommended_actions, mitre_techniques, evidence, tokens_in, tokens_out,\n    latency_ms, needs_human_review)\nVALUES ($1::uuid, 'langchain', $2, $3, $4::soc.severity_level, $5::soc.triage_verdict,\n        $6::numeric, $7, $8::jsonb, $9::text[], $10::jsonb, $11::int, $12::int, $13::int, $14::bool)\nRETURNING id, alert_id, verdict, suggested_severity, confidence, needs_human_review;",
+        "options": {
+          "queryReplacement": "={{ [\n  $json.alert_id, $json.model, $json.prompt_version, $json.suggested_severity,\n  $json.verdict, $json.confidence, $json.summary,\n  JSON.stringify($json.recommended_actions ?? []),\n  $json.mitre_techniques ?? [],\n  JSON.stringify($json.evidence ?? {}),\n  $json.tokens_in ?? 0, $json.tokens_out ?? 0, $json.latency_ms ?? 0,\n  $json.needs_human_review ?? false\n] }}"
+        }
+      },
+      "id": "b1a10008-0000-4000-8000-000000000008",
+      "name": "Postgres Guardar triaje",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [680, 300],
+      "credentials": {
+        "postgres": {
+          "id": "soclite-pg",
+          "name": "SOC-Lite PostgreSQL"
+        }
+      },
+      "notes": "Persiste el triaje con evidencias, confianza y consumo de tokens para auditoría de costes."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "esc-verdict",
+              "leftValue": "={{ $json.verdict }}",
+              "rightValue": "true_positive",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "esc-conf",
+              "leftValue": "={{ $json.confidence }}",
+              "rightValue": 0.7,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b1a10009-0000-4000-8000-000000000009",
+      "name": "IF Escalar",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [900, 300],
+      "notes": "Escala cuando el veredicto es positivo y la confianza supera 0,70; en caso contrario deja la alerta para revisión humana."
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "#soc-critical",
+          "mode": "name"
+        },
+        "text": "=:rotating_light: *Alerta {{ $('Normalizar alerta').item.json.severity.toUpperCase() }}* — {{ $('Normalizar alerta').item.json.title }}\n\n*Activo:* {{ $('Normalizar alerta').item.json.agent_name }} · *Origen:* {{ $('Normalizar alerta').item.json.src_ip }}\n*Veredicto IA:* {{ $json.verdict }} (confianza {{ (Number($json.confidence) * 100).toFixed(0) }}%)\n\n{{ $('HTTP Triaje IA').item.json.summary }}\n\n*Acciones sugeridas:*\n{{ ($('HTTP Triaje IA').item.json.recommended_actions || []).map((a, i) => `${i + 1}. ${a}`).join('\\n') }}\n\n<{{ $('Postgres Upsert alerta').item.json.id }}|Abrir en SOC-Lite>",
+        "otherOptions": {}
+      },
+      "id": "b1a10010-0000-4000-8000-000000000010",
+      "name": "Slack Notificar",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1140, 180],
+      "credentials": {
+        "slackApi": {
+          "id": "soclite-slack",
+          "name": "SOC-Lite Slack"
+        }
+      },
+      "notes": "Notificación enriquecida con resumen y acciones. Solo severidad crítica/alta con veredicto positivo."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://osticket.local/api/v1/tickets",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  subject: `[SOC-Lite] ${$('Normalizar alerta').item.json.title}`,\n  message: `Alerta ${$('Postgres Upsert alerta').item.json.id}\\n\\n${$('HTTP Triaje IA').item.json.summary}\\n\\nAcciones:\\n- ${($('HTTP Triaje IA').item.json.recommended_actions || []).join('\\n- ')}`,\n  priority: $('Normalizar alerta').item.json.severity === 'critical' ? 'emergency' : 'high',\n  source: 'SOC-Lite',\n  alert_id: $('Postgres Upsert alerta').item.json.id,\n  due_date: new Date(Date.now() + 4 * 3600 * 1000).toISOString()\n}) }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "b1a10011-0000-4000-8000-000000000011",
+      "name": "HTTP Crear ticket",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1140, 360],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "soclite-osticket",
+          "name": "osTicket API"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "onError": "continueRegularOutput",
+      "notes": "Crea el ticket en osTicket (o Redmine/Jira cambiando solo la URL). Si falla, el flujo continúa y la alerta queda en el dashboard."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO soc.audit_log (user_id, user_email, role_code, action, module, entity, entity_id, result, ip_address, user_agent, request_id, detail)\nVALUES (NULL, 'n8n-bot@soclite.local', 'service', 'triage.completed', 'triage', 'alert',\n        $1, 'success', '127.0.0.1', 'n8n/' || $2, gen_random_uuid(),\n        jsonb_build_object('workflow', $2, 'execution_id', $3, 'verdict', $4, 'severity', $5, 'model', $6));",
+        "options": {
+          "queryReplacement": "={{ [\n  $('Postgres Upsert alerta').item.json.id,\n  $workflow.name,\n  $execution.id,\n  $('Postgres Guardar triaje').item.json.verdict,\n  $('Postgres Guardar triaje').item.json.suggested_severity,\n  $('HTTP Triaje IA').item.json.model\n] }}"
+        }
+      },
+      "id": "b1a10012-0000-4000-8000-000000000012",
+      "name": "Postgres Bitácora",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1380, 300],
+      "credentials": {
+        "postgres": {
+          "id": "soclite-pg",
+          "name": "SOC-Lite PostgreSQL"
+        }
+      },
+      "notes": "Registra la entrada a la bitácora con usuario de servicio, hora, acción y detalle del triaje."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE soc.alerts\n   SET status = CASE WHEN $2 = 'true_positive' THEN 'triaged'::soc.alert_status\n                     ELSE 'in_review'::soc.alert_status END,\n       severity = $3::soc.severity_level,\n       updated_at = now()\n WHERE id = $1::uuid\nRETURNING id, status, severity;",
+        "options": {
+          "queryReplacement": "={{ [\n  $('Postgres Upsert alerta').item.json.id,\n  $('Postgres Guardar triaje').item.json.verdict,\n  $('Postgres Guardar triaje').item.json.suggested_severity\n] }}"
+        }
+      },
+      "id": "b1a10013-0000-4000-8000-000000000013",
+      "name": "Postgres Actualizar alerta",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1600, 300],
+      "credentials": {
+        "postgres": {
+          "id": "soclite-pg",
+          "name": "SOC-Lite PostgreSQL"
+        }
+      },
+      "notes": "Cierra el ciclo actualizando estado y severidad efectiva de la alerta."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({\n  status: 'processed',\n  alert_id: $('Postgres Upsert alerta').item.json.id,\n  verdict: $('Postgres Guardar triaje').item.json.verdict,\n  severity: $('Postgres Guardar triaje').item.json.suggested_severity,\n  confidence: $('Postgres Guardar triaje').item.json.confidence,\n  processed_at: new Date().toISOString()\n}) }}",
+        "options": {
+          "responseCode": 202
+        }
+      },
+      "id": "b1a10015-0000-4000-8000-000000000015",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1820, 300],
+      "notes": "Responde 202 al SIEM con el identificador y el veredicto."
+    },
+    {
+      "parameters": {
+        "notice": "Evento descartado por severidad informativa (nivel < 4). Se conserva la traza en la ejecución."
+      },
+      "id": "b1a10016-0000-4000-8000-000000000016",
+      "name": "Descartar informativo",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [-220, 480]
+    },
+    {
+      "parameters": {
+        "notice": "Ruido repetitivo: la alerta ya fue triajeada y su dedup_count supera 5. Solo se actualiza last_seen_at."
+      },
+      "id": "b1a10017-0000-4000-8000-000000000017",
+      "name": "Agrupar ruido",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [220, 480]
+    },
+    {
+      "parameters": {},
+      "id": "b1a10018-0000-4000-8000-000000000018",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [-880, 620]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO soc.audit_log (user_email, role_code, action, module, entity, entity_id, result, detail)\nVALUES ('n8n-bot@soclite.local', 'service', 'workflow.failed', 'triage', 'workflow',\n        $1, 'error', jsonb_build_object('workflow', $2, 'error', $3));",
+        "options": {
+          "queryReplacement": "={{ [\n  $json.execution?.id ?? 'N/D',\n  $json.workflow?.name ?? 'SOC-Lite',\n  String($json.execution?.error?.message ?? 'error desconocido').slice(0, 500)\n] }}"
+        }
+      },
+      "id": "b1a10019-0000-4000-8000-000000000019",
+      "name": "Postgres Error",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [-660, 620],
+      "credentials": {
+        "postgres": {
+          "id": "soclite-pg",
+          "name": "SOC-Lite PostgreSQL"
+        }
+      },
+      "notes": "Registra fallos del workflow en la bitácora para su revisión diaria."
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "#soc-ops",
+          "mode": "name"
+        },
+        "text": "=:warning: Fallo en el workflow *{{ $json.workflow?.name }}* (ejecución {{ $json.execution?.id }})\n\n{{ $json.execution?.error?.message }}"
+      },
+      "id": "b1a10020-0000-4000-8000-000000000020",
+      "name": "Slack Error",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [-440, 620],
+      "credentials": {
+        "slackApi": {
+          "id": "soclite-slack",
+          "name": "SOC-Lite Slack"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook Wazuh": {
+      "main": [
+        [
+          {
+            "node": "Normalizar alerta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalizar alerta": {
+      "main": [
+        [
+          {
+            "node": "IF Filtro severidad",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Filtro severidad": {
+      "main": [
+        [
+          {
+            "node": "Postgres Upsert alerta",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Descartar informativo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres Upsert alerta": {
+      "main": [
+        [
+          {
+            "node": "IF Ruido repetitivo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Ruido repetitivo": {
+      "main": [
+        [
+          {
+            "node": "HTTP Triaje IA",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Agrupar ruido",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Triaje IA": {
+      "main": [
+        [
+          {
+            "node": "Switch Severidad",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Postgres Bitácora",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch Severidad": {
+      "main": [
+        [
+          {
+            "node": "Postgres Guardar triaje",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Postgres Guardar triaje",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Postgres Guardar triaje",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres Guardar triaje": {
+      "main": [
+        [
+          {
+            "node": "IF Escalar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Escalar": {
+      "main": [
+        [
+          {
+            "node": "Slack Notificar",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "HTTP Crear ticket",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Postgres Bitácora",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack Notificar": {
+      "main": [
+        [
+          {
+            "node": "Postgres Bitácora",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Crear ticket": {
+      "main": [
+        [
+          {
+            "node": "Postgres Bitácora",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres Bitácora": {
+      "main": [
+        [
+          {
+            "node": "Postgres Actualizar alerta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres Actualizar alerta": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Postgres Error",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Slack Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "SOC-Lite · Error Handler",
+    "timezone": "America/Lima",
+    "executionTimeout": 300
+  },
+  "staticData": null,
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "pinData": {},
+  "versionId": "5f2a9c11-3d44-4e6b-9c1a-7b8d0e2f4a61",
+  "id": "soc-lite-triage-v1",
+  "tags": [
+    {
+      "name": "soc-lite"
+    },
+    {
+      "name": "ciberseguridad"
+    }
+  ]
+}
